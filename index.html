@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF QA Assistant</title>
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%);
+        margin: 0;
+        padding: 20px;
+        min-height: 100vh;
+        color: #333;
+    }
+    .container {
+        display: flex;
+        background: #fff;
+        width: 100%;
+        max-width: 1200px;
+        height: 80vh;
+        margin: 0 auto;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+    }
+    .sidebar {
+        flex: 1;
+        min-width: 300px;
+        background: #f9f9ff;
+        padding: 20px;
+        border-right: 1px solid #eee;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+    }
+    .upload-box {
+        border: 2px dashed #6a11cb;
+        border-radius: 10px;
+        padding: 40px 20px;
+        text-align: center;
+        cursor: pointer;
+        color: #6a11cb;
+        background: #fff;
+        transition: all 0.3s;
+    }
+    .upload-box:hover {
+        background: #f0f0ff;
+    }
+    .upload-box.processing {
+        pointer-events: none;
+        opacity: 0.6;
+    }
+    .progress-bar {
+        background: #eee;
+        height: 8px;
+        border-radius: 4px;
+        margin: 10px 0;
+        display: none;
+        overflow: hidden;
+    }
+    .progress-fill {
+        background: #6a11cb;
+        width: 0%;
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.3s;
+    }
+    .file-info {
+        background: #fff;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #ddd;
+        display: none;
+    }
+    .status {
+        padding: 10px;
+        border-radius: 6px;
+        font-size: 14px;
+        text-align: center;
+    }
+    .status.success {
+        background: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+    }
+    .status.error {
+        background: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+    }
+    .chat {
+        flex: 2;
+        display: flex;
+        flex-direction: column;
+        padding: 20px;
+    }
+    .chat-header {
+        font-size: 18px;
+        font-weight: bold;
+        margin-bottom: 15px;
+        color: #6a11cb;
+    }
+    .chat-box {
+        flex: 1;
+        background: #f0f4ff;
+        border-radius: 8px;
+        padding: 15px;
+        overflow-y: auto;
+        margin-bottom: 15px;
+        border: 1px solid #ddd;
+    }
+    .message {
+        margin: 10px 0;
+        padding: 12px 16px;
+        border-radius: 12px;
+        max-width: 80%;
+        word-wrap: break-word;
+    }
+    .message.user {
+        background: #6a11cb;
+        color: white;
+        margin-left: auto;
+    }
+    .message.bot {
+        background: #fff;
+        border: 1px solid #ddd;
+        color: #333;
+        margin-right: auto;
+    }
+    .chat-input {
+        display: flex;
+        gap: 10px;
+    }
+    .chat-input input {
+        flex: 1;
+        padding: 12px;
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        font-size: 14px;
+    }
+    .chat-input button {
+        background: #6a11cb;
+        color: white;
+        border: none;
+        padding: 12px 20px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    .chat-input button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+    }
+    .typing {
+        background: #fff;
+        border: 1px solid #ddd;
+        color: #666;
+        font-style: italic;
+        margin-right: auto;
+    }
+</style>
+</head>
+<body>
+<div class="container">
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="upload-box" id="uploadBox">
+            📄 Click to upload PDF or drag & drop here
+            <input type="file" id="fileInput" accept=".pdf" style="display:none;">
+        </div>
+        
+        <div class="progress-bar" id="progressBar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        
+        <div id="statusMessage"></div>
+        
+        <div class="file-info" id="fileInfo">
+            <h4 id="fileName"></h4>
+            <p>Processing complete! You can now ask questions.</p>
+        </div>
+    </div>
+
+    <!-- Chat Section -->
+    <div class="chat">
+        <div class="chat-header">AI Assistant</div>
+        <div class="chat-box" id="chatBox">
+            <div class="message bot">Hello! Please upload a PDF file and I'll help you answer questions about it.</div>
+        </div>
+        <div class="chat-input">
+            <input type="text" id="questionInput" placeholder="Upload a PDF first..." disabled>
+            <button id="sendBtn" onclick="sendQuestion()" disabled>Send</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// Global state
+let isReady = false;
+let isProcessing = false;
+
+// Get DOM elements
+const uploadBox = document.getElementById('uploadBox');
+const fileInput = document.getElementById('fileInput');
+const progressBar = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+const statusMessage = document.getElementById('statusMessage');
+const fileInfo = document.getElementById('fileInfo');
+const fileName = document.getElementById('fileName');
+const chatBox = document.getElementById('chatBox');
+const questionInput = document.getElementById('questionInput');
+const sendBtn = document.getElementById('sendBtn');
+
+// Utility functions
+function showStatus(message, type = 'info') {
+    statusMessage.innerHTML = `<div class="status ${type}">${message}</div>`;
+}
+
+function addMessage(text, isUser = false) {
+    const div = document.createElement('div');
+    div.className = `message ${isUser ? 'user' : 'bot'}`;
+    div.textContent = text;
+    chatBox.appendChild(div);
+    chatBox.scrollTop = chatBox.scrollHeight;
+    return div;
+}
+
+function updateUI(ready = false) {
+    isReady = ready;
+    questionInput.disabled = !ready || isProcessing;
+    sendBtn.disabled = !ready || isProcessing;
+    questionInput.placeholder = ready ? 'Ask a question about your PDF...' : 'Upload a PDF first...';
+}
+
+// File upload setup
+uploadBox.addEventListener('click', () => {
+    if (!isProcessing) fileInput.click();
+});
+
+// Handle file selection
+fileInput.addEventListener('change', function(e) {
+    const file = e.target.files[0];
+    if (file && file.type === 'application/pdf') {
+        uploadFile(file);
+    } else {
+        showStatus('Please select a PDF file', 'error');
+    }
+});
+
+// Drag and drop
+uploadBox.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    uploadBox.style.background = '#e6f3ff';
+});
+
+uploadBox.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    uploadBox.style.background = '#fff';
+});
+
+uploadBox.addEventListener('drop', (e) => {
+    e.preventDefault();
+    uploadBox.style.background = '#fff';
+    const files = e.dataTransfer.files;
+    if (files.length > 0 && files[0].type === 'application/pdf') {
+        fileInput.files = files;
+        uploadFile(files[0]);
+    } else {
+        showStatus('Please drop a PDF file', 'error');
+    }
+});
+
+// Upload file function
+async function uploadFile(file) {
+    console.log('Starting upload...', file.name);
+    isProcessing = true;
+    uploadBox.classList.add('processing');
+    progressBar.style.display = 'block';
+    fileInfo.style.display = 'none';
+    updateUI(false);
+    
+    showStatus('Uploading file...', 'info');
+    
+    try {
+        // Upload file
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        const response = await fetch('http://127.0.0.1:5000/uploadprogress', {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Upload failed: ${response.statusText}`);
+        }
+        
+        showStatus('Processing PDF...', 'info');
+        
+        // Monitor progress
+        monitorProgress(file.name);
+        
+    } catch (error) {
+        console.error('Upload error:', error);
+        showStatus(`Upload failed: ${error.message}`, 'error');
+        resetUpload();
+    }
+}
+
+// Monitor processing progress
+function monitorProgress(filename) {
+    console.log('Starting progress monitoring...');
+    const eventSource = new EventSource('http://127.0.0.1:5000/progress');
+    
+    eventSource.onmessage = function(event) {
+        const progress = parseInt(event.data);
+        console.log('Progress:', progress);
+        progressFill.style.width = progress + '%';
+        
+        if (progress >= 100) {
+            eventSource.close();
+            onProcessingComplete(filename);
+        } else if (progress < 0) {
+            eventSource.close();
+            showStatus('Processing failed. Please try again.', 'error');
+            resetUpload();
+        }
+    };
+    
+    eventSource.onerror = function(error) {
+        console.error('EventSource error:', error);
+        eventSource.close();
+        showStatus('Connection error. Please refresh and try again.', 'error');
+        resetUpload();
+    };
+}
+
+// Processing complete
+function onProcessingComplete(filename) {
+    console.log('Processing complete');
+    fileName.textContent = filename;
+    fileInfo.style.display = 'block';
+    showStatus('PDF processed successfully!', 'success');
+    addMessage('✅ PDF processed successfully! You can now ask questions.');
+    resetUpload();
+    updateUI(true);
+    questionInput.focus();
+}
+
+// Reset upload state
+function resetUpload() {
+    isProcessing = false;
+    uploadBox.classList.remove('processing');
+    progressBar.style.display = 'none';
+    progressFill.style.width = '0%';
+}
+
+// Send question function
+async function sendQuestion() {
+    const question = questionInput.value.trim();
+    if (!question || !isReady || isProcessing) return;
+    
+    console.log('Sending question:', question);
+    
+    // Add user message
+    addMessage(question, true);
+    questionInput.value = '';
+    
+    // Show typing indicator
+    const typingMsg = addMessage('AI is thinking...');
+    typingMsg.classList.add('typing');
+    
+    // Disable input
+    isProcessing = true;
+    updateUI(false);
+    
+    try {
+        const response = await fetch('http://127.0.0.1:5000/ask', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ question: question })
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Server error: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        // Remove typing indicator
+        typingMsg.remove();
+        
+        // Add response
+        addMessage(data.answer || 'Sorry, I could not generate a response.');
+        
+    } catch (error) {
+        console.error('Question error:', error);
+        typingMsg.remove();
+        addMessage('❌ Error: Could not get response. Please try again.');
+        showStatus(`Error: ${error.message}`, 'error');
+    } finally {
+        isProcessing = false;
+        updateUI(true);
+        questionInput.focus();
+    }
+}
+
+// Enter key handler
+questionInput.addEventListener('keypress', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendQuestion();
+    }
+});
+
+// Test server connection on load
+window.addEventListener('load', async function() {
+    try {
+        const response = await fetch('http://127.0.0.1:5000/health');
+        if (response.ok) {
+            showStatus('Connected to server', 'success');
+        } else {
+            throw new Error('Server not responding');
+        }
+    } catch (error) {
+        showStatus('⚠️ Cannot connect to server. Make sure the Flask app is running on port 5000.', 'error');
+        console.error('Server connection error:', error);
+    }
+});
+
+console.log('Frontend loaded');
+</script>
+</body>
+</html>
