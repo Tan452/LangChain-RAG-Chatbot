@@ -1,122 +1,233 @@
-import streamlit as st
+import os
+import time
+import threading
+from flask import Flask, request, jsonify, Response
+from flask_cors import CORS
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
-from langchain.prompts import PromptTemplate
-from langchain_community.chat_models import ChatOpenAI
-import os
-import base64
-from datetime import datetime
-from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from langchain.chains import ConversationalRetrievalChain
 
-load_dotenv()  # load environment variables from .env file
+# Flask setup
+app = Flask(__name__)
+CORS(app)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Create upload directory
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-def get_pdf_text(pdf_docs):
-    text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
+# Global variables
+retriever = None
+chat_history = []
+upload_progress = 0
 
+@app.route("/")
+def index():
+    return "PDF QA Assistant API is running!"
 
-def get_text_chunks(text):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = text_splitter.split_text(text)
-    return chunks
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok", 
+        "retriever_ready": retriever is not None,
+        "progress": upload_progress
+    })
 
-
-def get_vector_store(text_chunks):
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vector_store = FAISS.from_texts(text_chunks, embedding=embeddings)
-    vector_store.save_local("faiss_index")
-    return vector_store
-
-
-def load_vector_store():
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    return FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-
-
-def get_qa_chain():
-    prompt_template = """
-    Answer the question as detailed as possible from the provided context, make sure to provide all the details. 
-    If answer is not in the context, say "Answer not available in the context."
+@app.route("/uploadprogress", methods=["POST"])
+def upload_progress_route():
+    global chat_history, upload_progress
     
-    Context:
-    {context}
+    print("Upload request received")
     
-    Question:
-    {question}
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
     
-    Answer:
-    """
-    prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    # model = ChatOpenAI(model_name="gpt-4", temperature=0.3, openai_api_key=OPENAI_API_KEY)
-    model = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0.3, openai_api_key=OPENAI_API_KEY)
-
-    chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
-    return chain
-
-
-def chat_with_pdf(user_question, vector_store, conversation_history):
-    docs = vector_store.similarity_search(user_question, k=5)
-    chain = get_qa_chain()
-    response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
-    answer = response["output_text"]
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    conversation_history.append({"question": user_question, "answer": answer, "timestamp": timestamp})
-    return answer
-
-
-def display_conversation(conversation_history):
-    for turn in conversation_history:
-        st.markdown(f"<div style='margin-bottom:8px;'><b>You:</b> {turn['question']}</div>", unsafe_allow_html=True)
-        st.markdown(f"<div style='margin-bottom:15px; color:#555;'><b>Bot:</b> {turn['answer']}</div>", unsafe_allow_html=True)
-
-
-def main():
-    st.set_page_config(page_title="Chat with PDFs (HuggingFace+OpenAI)", page_icon=":books:")
-    st.title("Chat with PDFs using Hugging Face Embeddings & OpenAI")
-
-    if "conversation_history" not in st.session_state:
-        st.session_state.conversation_history = []
-
-    pdf_docs = st.file_uploader("Upload PDF files (multiple)", accept_multiple_files=True, type=['pdf'])
-
-    if pdf_docs:
-        if st.button("Process PDFs"):
-            with st.spinner("Processing PDFs and indexing..."):
-                text = get_pdf_text(pdf_docs)
-                chunks = get_text_chunks(text)
-                vector_store = get_vector_store(chunks)
-            st.success("PDFs processed and indexed. You can start asking questions now.")
-            st.session_state.vector_store = vector_store
-
-    if "vector_store" in st.session_state:
-        user_question = st.text_input("Ask a question about the uploaded PDFs:")
-        if user_question:
-            with st.spinner("Generating answer..."):
-                answer = chat_with_pdf(user_question, st.session_state.vector_store, st.session_state.conversation_history)
-            display_conversation(st.session_state.conversation_history)
+    file = request.files['file']
+    if not file or file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+        
+    if not file.filename.lower().endswith('.pdf'):
+        return jsonify({"error": "Only PDF files allowed"}), 400
     
-    # Option to download conversation history
-    if st.session_state.conversation_history:
-        df_data = [
-            [turn["question"], turn["answer"], turn["timestamp"]]
-            for turn in st.session_state.conversation_history
-        ]
-        import pandas as pd
-        df = pd.DataFrame(df_data, columns=["Question", "Answer", "Timestamp"])
-        csv = df.to_csv(index=False)
-        b64 = base64.b64encode(csv.encode()).decode()
-        href = f'<a href="data:file/csv;base64,{b64}" download="chat_history.csv">Download conversation history as CSV</a>'
-        st.markdown(href, unsafe_allow_html=True)
+    # Save file
+    filepath = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(filepath)
+    print(f"File saved: {filepath}")
+    
+    # Reset state
+    chat_history = []
+    upload_progress = 0
+    
+    # Start processing in background
+    thread = threading.Thread(target=process_pdf, args=(filepath,))
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({"message": "Upload successful, processing started"})
 
+@app.route("/progress")
+def progress():
+    def generate():
+        global upload_progress
+        last_sent = -1
+        timeout = 300  # 5 minutes timeout
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            current_progress = upload_progress
+            
+            if current_progress != last_sent:
+                yield f"data: {current_progress}\n\n"
+                last_sent = current_progress
+                print(f"Progress sent: {current_progress}%")
+            
+            if current_progress >= 100 or current_progress < 0:
+                break
+                
+            time.sleep(0.5)
+        
+        # Send final progress
+        yield f"data: {upload_progress}\n\n"
+    
+    response = Response(generate(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Connection'] = 'keep-alive'
+    return response
+
+@app.route("/ask", methods=["POST"])
+def ask():
+    global retriever, chat_history
+    
+    print("Question request received")
+    
+    if not retriever:
+        return jsonify({"error": "No document uploaded"}), 400
+    
+    data = request.get_json()
+    if not data or 'question' not in data:
+        return jsonify({"error": "Question required"}), 400
+    
+    question = data['question'].strip()
+    if not question:
+        return jsonify({"error": "Question cannot be empty"}), 400
+    
+    print(f"Processing question: {question}")
+    
+    try:
+        # Check for OpenAI API key
+        if not os.getenv("OPENAI_API_KEY"):
+            return jsonify({"error": "OpenAI API key not configured. Please set OPENAI_API_KEY environment variable."}), 500
+        
+        # Create chain
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        chain = ConversationalRetrievalChain.from_llm(llm, retriever)
+        
+        # Get answer
+        result = chain.invoke({
+            "question": question, 
+            "chat_history": chat_history[-5:]  # Keep last 5 exchanges
+        })
+        
+        answer = result["answer"]
+        chat_history.append((question, answer))
+        
+        print(f"Answer generated: {answer[:100]}...")
+        return jsonify({"answer": answer})
+        
+    except Exception as e:
+        print(f"Error processing question: {str(e)}")
+        return jsonify({"error": f"Error: {str(e)}"}), 500
+
+def process_pdf(filepath):
+    global retriever, upload_progress
+    
+    try:
+        print(f"Starting PDF processing: {filepath}")
+        upload_progress = 10
+        
+        # Read PDF
+        reader = PdfReader(filepath)
+        total_pages = len(reader.pages)
+        print(f"PDF has {total_pages} pages")
+        
+        if total_pages == 0:
+            print("Error: PDF has no pages")
+            upload_progress = -1
+            return
+        
+        upload_progress = 20
+        
+        # Extract text
+        text = ""
+        for i, page in enumerate(reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+                # Update progress 20-60%
+                upload_progress = 20 + int((i + 1) / total_pages * 40)
+                time.sleep(0.1)  # Small delay for progress visualization
+            except Exception as e:
+                print(f"Error extracting text from page {i+1}: {e}")
+                continue
+        
+        if not text.strip():
+            print("Error: No text extracted from PDF")
+            upload_progress = -1
+            return
+        
+        print(f"Text extracted: {len(text)} characters")
+        upload_progress = 65
+        
+        # Split text
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+        chunks = splitter.split_text(text)
+        print(f"Created {len(chunks)} chunks")
+        upload_progress = 75
+        
+        if not chunks:
+            print("Error: No chunks created")
+            upload_progress = -1
+            return
+        
+        # Create embeddings
+        print("Creating embeddings...")
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+        upload_progress = 85
+        
+        # Create vector store
+        print("Creating vector store...")
+        vectorstore = FAISS.from_texts(chunks, embeddings)
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+        upload_progress = 95
+        
+        print("PDF processing completed successfully!")
+        upload_progress = 100
+        
+        # Clean up file
+        try:
+            os.remove(filepath)
+            print(f"Cleaned up: {filepath}")
+        except:
+            pass
+            
+    except Exception as e:
+        print(f"PDF processing error: {str(e)}")
+        upload_progress = -1
 
 if __name__ == "__main__":
-    main()
+    print("Starting PDF QA Assistant server...")
+    print("Make sure to set OPENAI_API_KEY environment variable!")
+    
+    if not os.getenv("OPENAI_API_KEY"):
+        print("\n⚠️  WARNING: OPENAI_API_KEY not found!")
+        print("   Please set it: export OPENAI_API_KEY='your-api-key-here'\n")
+    
+    app.run(debug=True, host='127.0.0.1', port=5000, threaded=True)
